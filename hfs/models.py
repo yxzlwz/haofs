@@ -15,12 +15,10 @@ class Account:
     email: str = None  # 当前好分数账号邮箱地址
     password: str = None  # 当前好分数账号密码
     session: Session = None  # requests会话
-    __student_data: dict = None  # 当前学生信息
+    __account_data: dict = None  # 当前学生信息
     __exams_data: list = None  # 考试列表
 
-    def __init__(self,
-                 log: bool = False,
-                 proxies: str | Dict[str, str] = None):
+    def __init__(self, log: bool = False, proxies=None):
         # 初始化session
         self.session = Session()
 
@@ -69,13 +67,15 @@ class Account:
                  studentName,
                  xuehao,
                  schoolName: str = None,
-                 password: str = None):
+                 password: str = None,
+                 max_retry: int = 5):
         '''
             提供学生姓名和学号，自动使用临时邮箱注册、验证并登录好分数账号，返回生成账号的邮箱地址和密码。
             @param studentName: 学生姓名
             @param xuehao: 学号
             @param schoolName: 学校名称，可不填，用于对重名重学号的学生进行区分，若要填写请务必先抓包确认学校名称是否正确！
             @param password: 指定生成的学生账号设置的密码，可不填，若不填则自动生成随机密码
+            @param max_retry: 最大重试次数，若注册失败则会重试，直到达到最大重试次数为止
             返回值：元组(邮箱地址，密码)
         '''
         if password is None:
@@ -126,12 +126,18 @@ class Account:
         # 获取验证邮件并验证
         time.sleep(5)
         r = None
-        while r is None:
+        retry = 0
+        while retry < max_retry:
             try:
                 r = temp_mail.get_message()
+                break
             except IndexError:
                 self.logger.info('验证邮件获取失败，将在5秒后重试...')
                 time.sleep(5)
+                retry += 1
+        else:
+            self.logger.warning(f'验证邮件获取失败，已达到最大重试次数，注册失败。')
+            return None, None
         self.logger.info(f'验证邮件获取成功，开始验证...')
 
         ver_url = re.findall(r'>(http://www.haofenshu.com/.*?)<', r['html'][0])
@@ -164,6 +170,15 @@ class Account:
         self.logger.info(f'注册并绑定成功，账号为{self.email}，密码为{self.password}')
         return self.email, self.password
 
+    def __get_account_data(self):
+        assert self.logged_in, '获取学生信息前请先登录账号！'
+        if self.__account_data is None:
+            self.logger.info(f'未找到缓存，正在联网获取{{{self.email}}}账号的student信息...')
+            r = self.session.get(
+                'https://hfs-be.yunxiao.com/v2/user-center/user-snapshot'
+            ).json()
+            self.__account_data = r['data']
+
     @property
     def student(self):
         '''
@@ -175,20 +190,25 @@ class Account:
             @return grade: 年级
             @return className: 班级（导师姓名）
         '''
-        assert self.logged_in, '获取学生信息前请先登录账号！'
-        if self.__student_data is None:
-            self.logger.info(f'未找到缓存，正在联网获取{{{self.email}}}账号的student信息...')
-            r = self.session.get(
-                'https://hfs-be.yunxiao.com/v2/user-center/user-snapshot'
-            ).json()
-            data = r['data']['linkedStudent']
-            self.__student_data = {
-                i: data[i]
-                for i in ('studentId', 'studentName', 'schoolName', 'grade',
-                          'className')
-            }
-            self.__student_data['xuehao'] = data['xuehao'][0]
-        return self.__student_data
+        self.__get_account_data()
+
+        data = {
+            i: self.__account_data['linkedStudent'][i]
+            for i in ('studentId', 'studentName', 'schoolName', 'grade',
+                      'className', 'xuehao')
+        }
+        data['xuehao'] = data['xuehao'][0]
+        return data
+
+    @property
+    def is_member(self):
+        '''
+            判断当前账号是否为会员。
+            @return (Bool)
+        '''
+        self.__get_account_data()
+
+        return self.__account_data['isMember']
 
     @property
     def exams(self):
@@ -210,6 +230,13 @@ class Account:
         '''
         assert self.logged_in, '获取考试详情前请先登录账号！'
         return Exam(self, self.exams[latest]['examId'])
+
+    def get_exam_by_id(self, examId):
+        '''
+            @param examId: 要获取的考试ID（由好分数生成）。
+        '''
+        assert self.logged_in, '获取考试详情前请先登录账号！'
+        return Exam(self, examId)
 
     def __str__(self):
         '''
@@ -262,6 +289,8 @@ class Exam(IncludeAccount):
         '''
             获取考试详细数据的精简信息。
         '''
+        if self.full_data is None:
+            return None
         return {
             i: self.full_data[i]
             for i in (
