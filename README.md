@@ -81,4 +81,4 @@ print(paper.questions)
 
 ## 联系方式
 
-[mail@yixiangzhilv.com](mailto:mail@yixiangzhilv.com)
+i@yxzl.dev
